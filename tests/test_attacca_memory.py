@@ -361,3 +361,20 @@ class AlreadyInjectedTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DefaultBaseUrlTest(unittest.TestCase):
+    """The public API base carries the `/api` prefix the web tier proxies.
+
+    `https://attacca.cc/v1/memory/recall` is answered by nginx with 405 (only
+    `/api/` is proxied to the server), so a default without the prefix makes
+    every hook fail open and recall nothing.
+    """
+
+    def test_the_default_base_url_includes_the_api_prefix(self):
+        config = am.Config.from_env({})
+        self.assertEqual(config.base_url, "https://attacca.cc/api")
+
+    def test_the_recall_url_is_the_proxied_path(self):
+        client = am.HttpRecallClient("https://attacca.cc/api", "atk_test")
+        self.assertEqual(client.base_url + "/v1/memory/recall", "https://attacca.cc/api/v1/memory/recall")

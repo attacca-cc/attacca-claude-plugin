@@ -1,7 +1,7 @@
 {
   "name": "attacca",
   "displayName": "Attacca Memory",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Bring your Attacca long-term memory into Claude Code: what Attacca already knows is injected at session start and on each prompt, and (opt-in) your completed turns are written back in six-turn batches.",
   "author": {
     "name": "Walrus Lab",
@@ -26,8 +26,8 @@
     "attacca_url": {
       "type": "string",
       "title": "Attacca URL",
-      "description": "Base URL of your Attacca instance. Leave the default unless you run a self-hosted one (no trailing slash).",
-      "default": "https://attacca.cc"
+      "description": "Base URL of your Attacca instance, including the /api prefix. Leave the default unless you run a self-hosted one (no trailing slash).",
+      "default": "https://attacca.cc/api"
     },
     "attacca_token": {
       "type": "string",

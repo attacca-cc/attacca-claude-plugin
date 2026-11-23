@@ -168,7 +168,7 @@ def _read_float(env, name, default):
 
 @dataclass
 class Config:
-    base_url: str = "https://attacca.cc"
+    base_url: str = "https://attacca.cc/api"
     token: str = ""
     recall_on_prompt: bool = True
     project_id: str = ""
@@ -197,7 +197,7 @@ class Config:
                 os.path.expanduser("~"), ".cache", "attacca-claude-plugin"
             )
         return cls(
-            base_url=_read(env, "CLAUDE_PLUGIN_OPTION_ATTACCA_URL", "https://attacca.cc"),
+            base_url=_read(env, "CLAUDE_PLUGIN_OPTION_ATTACCA_URL", "https://attacca.cc/api"),
             token=_read(env, "CLAUDE_PLUGIN_OPTION_ATTACCA_TOKEN", ""),
             recall_on_prompt=_read_bool(
                 env, "CLAUDE_PLUGIN_OPTION_RECALL_ON_PROMPT", True
