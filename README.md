@@ -16,13 +16,15 @@ Inside a Claude Code session:
 ```
 /plugin marketplace add attacca-cc/attacca-claude-plugin
 /plugin install attacca@attacca-claude-plugin
-/attacca:status
+/plugin configure attacca@attacca-claude-plugin
 ```
 
-The install prompts for two settings: your Attacca URL (default `https://attacca.cc`, leave it) and
-an Attacca API key. Paste the key; it is stored in your platform's credential store, not in
-`settings.json`. `/attacca:status` then shows how many nodes Attacca holds for your account. If you
-skipped the prompt, set the key later with `/config` and restart the session.
+The third command is where the plugin gets your settings: leave **Attacca URL** at `https://attacca.cc`
+unless you self-host, and paste your API key into **Attacca API key** (the option is `sensitive`, so it
+is stored as a credential rather than in plain text). `claude plugin install` from a terminal instead
+of a session prints the same instruction as `5 userConfig options not yet set (1 required) — run
+/plugin configure attacca@attacca-claude-plugin`. Then start a new session (`/clear` is enough) so the
+hooks pick the key up, and run `/attacca:status` to see how many nodes Attacca holds for your account.
 
 ### Getting the API key
 
