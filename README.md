@@ -39,9 +39,12 @@ hooks pick the key up, and run `/attacca:status` to see how many nodes Attacca h
 |---|---|---|---|
 | `SessionStart` | a session starts, resumes, is cleared, compacted or forked | a fixed profile query | 2 s, 1,200 tokens |
 | `UserPromptSubmit` | before each prompt you type | the prompt text | 4 s hard deadline, 800 tokens |
+| `Stop` | Claude finishes a response | the turn pair, to the local queue (async) | off the response path |
+| `SessionEnd` | the session terminates | a last flush of whatever is queued (async) | best effort, 1.5 s shared |
 
-Both hooks call `POST /v1/memory/recall` on your Attacca instance with a `cc:<session_id>` external
-session id, and put the rendered block into Claude's context.
+The first two call `POST /v1/memory/recall` on your Attacca instance with a `cc:<session_id>` external
+session id, and put the rendered block into Claude's context. The last two are the write path, and
+they do nothing unless `observe_enabled` is on (see [Write-back](#write-back-opt-in)).
 
 Everything fails open. If Attacca is slow, down, returns 5xx, or returns something that does not
 parse, the hook prints nothing and exits 0. A prompt is never delayed past its deadline, blocked or
@@ -55,6 +58,86 @@ lost because of this plugin.
 - every node in the answer was already injected in this session
 - a recall failed in the last 60 seconds (circuit breaker)
 - no API key is configured
+
+## Write-back (opt-in)
+
+`observe_enabled` ships **`false`**. Turned on, each turn you finish becomes a record in Attacca
+memory, so `memory_recall` in this session and a chat in Attacca a few minutes later can find what
+you settled here.
+
+**What is sent.** Each completed turn is the pair (your prompt, Claude's final reply) and nothing
+else. No file contents, no tool output, no terminal history: the hook reads only the prompt it was
+given and `last_assistant_message` from the `Stop` event. The text is passed through the server's
+redaction before it is stored, so a credential pasted into a prompt is masked on the server rather
+than trusted to every client.
+
+**How a turn is queued.** `Stop` fires when Claude finishes a response, so that is where a turn pair
+is settled. The pair is appended to `${CLAUDE_PLUGIN_DATA}/queue/<session>.jsonl` with a
+client-generated ULID `turn_id` on each half. The file *is* the queue: the send happens later, and a
+turn survives a crashed session.
+
+**Why `Stop` and not `SessionEnd`.** Two reasons, both from the hooks reference:
+- `Stop` fires at the end of *every* response, so a turn is on disk while the session is still
+  alive. A `SessionEnd`-only design loses everything when a session is killed or a laptop closes.
+- A plugin's `SessionEnd` hook runs on a shared **1.5-second** budget that a plugin cannot raise
+  (only the user's own settings can raise it), and a turn is worth more than what fits in it. A
+  `SessionEnd` hook still makes a best-effort flush of the remaining queue, but it is not where a
+  turn is recorded.
+
+Both write hooks are declared `"async": true`, so Claude Code starts them and carries on: the
+response you are waiting for is never held open by this plugin. Async hooks cannot block or decide
+anything, and nothing is printed on these paths (Claude Code would read stdout of an async hook as
+hook output).
+
+**Batching.** Each `Stop` checks the queue against a boundary:
+
+| Constant (env name) | Default | Meaning |
+|---|---|---|
+| `ATTACCA_BATCH_TURNS` | `6` | turns per batch; a pair is two turns, so three prompts |
+| `ATTACCA_BATCH_MAX_AGE_SECS` | `600` | send an undersized batch once its oldest pair is this old |
+| `ATTACCA_QUEUE_MAX_PAIRS` | `200` | cap on queued pairs; the oldest are dropped past it |
+| `ATTACCA_OBSERVE_DEADLINE_SECS` | `120` | the observe request's own budget |
+
+At the boundary the oldest six turns go to `POST /v1/memory/observe` with `flush: true`, so the call
+that records them also distils them into an episode. The 120-second budget is deliberate:
+`flush: true` runs a consolidation pass, which is a model call, and a normal socket timeout would
+abandon a request the server was still working on.
+
+**Exactly once, without a transaction.** A batch leaves the queue only after the server has answered
+for it. A failure (network, 5xx, 429, timeout) leaves every line in place, and the next boundary
+sends the same turns again under the same `turn_id`s; the server's ledger takes them as `skipped`
+instead of recording a second copy. A 4xx that cannot improve (400, 401, 403, 404, 422 — a key
+without `memory:write`, a malformed turn) drops that batch and writes the reason to stderr, because
+resending it forever would only fill the queue.
+
+**Turning it off per repository.** A repository can refuse whatever the user setting says by adding
+`.claude/attacca.toml` at its root:
+
+```toml
+# This repository stays out of Attacca memory.
+observe = false
+```
+
+The hook looks for that file from the session's working directory up to the filesystem root, so a
+session started in a subdirectory still finds it. With it in place **no outbound call is made and
+nothing is written to the queue**: the turn is not recorded locally either, because a local copy of
+what an opted-out repository said is exactly what the opt-out is about.
+
+**Known limitation: headless sessions.** In `claude -p`, Claude Code kills an async hook still
+running at teardown. The queue write is fast and usually lands, but the flush may not, so a `-p` run
+can leave turns queued under a session nothing will flush. Interactive sessions do not have this
+problem, because the hooks run while the session lives.
+
+**Deciding whether to turn it on by default.** Write-back ships off so the read path is measured
+first. The procedure to revisit that:
+1. Collect at least two weeks of read-only installs, with `/metrics` (`memory_recall_*`,
+   `memory_observe_turns`) and the app's memory pipeline page as the record.
+2. Turn `observe_enabled` on for internal accounts only, and compare
+   `memory_recall_nonempty_ratio` before and after: write-back should raise it.
+3. Watch `memory_observe_turns` against the daily turn cap and the consolidation backlog. If
+   episodes pile up, the batch size or the cap is wrong, not the switch.
+4. Only then change the plugin's default, recording the before/after numbers in the commit that
+   flips it.
 
 ## Privacy
 
@@ -138,7 +221,9 @@ against a closed port and asserts exit 0 with empty stdout.
 ## Status
 
 - Read-only recall: working.
+- Write-back (`observe`, six-turn batches, repository opt-out): working, opt-in (`observe_enabled`,
+  default `false`).
 - MCP read tools (`memory_recall`, `memory_search`, `memory_status`): declared, landing with
   `/v1/mcp`.
-- Write-back (`observe`, `notes`): not in this version.
+- `notes` / `/attacca:remember`: not in this version.
 - License: not chosen yet; the repository is public without one until the owner sets it.

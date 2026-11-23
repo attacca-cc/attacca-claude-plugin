@@ -1,5 +1,5 @@
 {
-  "description": "Attacca memory: inject relevant memory at session start, and before each prompt you send.",
+  "description": "Attacca memory: inject relevant memory at session start and before each prompt; with observe_enabled, send completed turns back in six-turn batches.",
   "hooks": {
     "SessionStart": [
       {
@@ -23,6 +23,30 @@
             "command": "python3",
             "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/attacca_memory.py", "prompt-submit"],
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/attacca_memory.py", "stop"],
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/attacca_memory.py", "session-end"],
+            "async": true
           }
         ]
       }

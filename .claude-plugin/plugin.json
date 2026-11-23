@@ -25,7 +25,7 @@
     "attacca_token": {
       "type": "string",
       "title": "Attacca API key",
-      "description": "An API key with the memory:read scope. Create one in Attacca under Settings -> API keys.",
+      "description": "An API key with the memory:read scope. Add memory:write too if you turn on observe_enabled. Create one in Attacca under Settings -> API keys.",
       "sensitive": true,
       "required": true
     },
