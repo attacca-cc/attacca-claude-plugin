@@ -5,9 +5,10 @@ knows about you, your projects and the decisions you have settled is recalled an
 context at session start and before each prompt, so you do not start every session by explaining
 yourself again.
 
-This is v0.1: a **read-only** plugin. It recalls memory and shows you what Attacca knows. It does
-not write anything back yet; sending session activity to Attacca is a later version and ships
-switched off.
+This is v0.2: the read path is on by default, and the **write path is opt-in**. It recalls memory
+and shows you what Attacca knows; with `observe_enabled` it also sends each completed turn back to
+Attacca in six-turn batches, so the next session (and Attacca chat) can recall what you settled here.
+Write-back ships **switched off**.
 
 ## Install (three commands)
 
@@ -29,8 +30,9 @@ hooks pick the key up, and run `/attacca:status` to see how many nodes Attacca h
 ### Getting the API key
 
 1. Sign in at <https://attacca.cc> and open **Settings → API keys**.
-2. Create a key with the **`memory:read`** scope. v0.1 needs nothing else; `memory:write` is for the
-   read-write version and is never sent by this plugin.
+2. Create a key with the **`memory:read`** scope. Add **`memory:write`** only if you turn on
+   `observe_enabled`; a key without it drops observe batches instead of failing a prompt (see
+   [Write-back](#write-back-opt-in)).
 3. Copy the key once (it starts with `atk_`; Attacca shows it only at creation).
 
 ## What it does
@@ -106,7 +108,7 @@ abandon a request the server was still working on.
 **Exactly once, without a transaction.** A batch leaves the queue only after the server has answered
 for it. A failure (network, 5xx, 429, timeout) leaves every line in place, and the next boundary
 sends the same turns again under the same `turn_id`s; the server's ledger takes them as `skipped`
-instead of recording a second copy. A 4xx that cannot improve (400, 401, 403, 404, 422 — a key
+instead of recording a second copy. A 4xx that cannot improve (400, 401, 403, 404, 413, 422 — a key
 without `memory:write`, a malformed turn) drops that batch and writes the reason to stderr, because
 resending it forever would only fill the queue.
 
@@ -118,10 +120,11 @@ resending it forever would only fill the queue.
 observe = false
 ```
 
-The hook looks for that file from the session's working directory up to the filesystem root, so a
-session started in a subdirectory still finds it. With it in place **no outbound call is made and
-nothing is written to the queue**: the turn is not recorded locally either, because a local copy of
-what an opted-out repository said is exactly what the opt-out is about.
+The hook looks for that file from the session's working directory upwards (up to twelve parents), so
+a session started in a subdirectory still finds it. With it in place the plugin makes **no outbound
+call with your prompt text** and writes nothing to the queue: the per-prompt recall is skipped as
+well, because the prompt is exactly what the opt-out is about, and the turn is not recorded locally
+either. `SessionStart` still asks for the account profile, which carries no session text.
 
 **Known limitation: headless sessions.** In `claude -p`, Claude Code kills an async hook still
 running at teardown. The queue write is fast and usually lands, but the flush may not, so a `-p` run
@@ -142,11 +145,17 @@ first. The procedure to revisit that:
 ## Privacy
 
 **Two parties see your session.** The prompt text you type goes to Anthropic (as it always does) and
-to the Attacca instance configured in `attacca_url` (by default, ours). In v0.1 that is the whole
-traffic: the prompt and nothing else. Your code, file contents and terminal output are **not** sent,
-because v0.1 has no write path and no tool that reads files. A later version that sends session
-activity to Attacca is opt-in (`observe_enabled`, default `false`) and will be documented when it
-ships.
+to the Attacca instance configured in `attacca_url` (by default, ours).
+
+With `observe_enabled` on, each completed turn pair also goes to Attacca, batched six turns at a
+time: your prompt and Claude's final reply for that turn. Code, file contents and terminal output are
+**not** sent, because the hook reads only the prompt and `last_assistant_message`. Text is redacted on
+the server before it is stored. Turning `observe_enabled` off, or adding `.claude/attacca.toml` with
+`observe = false`, stops the traffic.
+
+Queued turns sit as plain text under `${CLAUDE_PLUGIN_DATA}/queue/` (mode `0600`) until they are
+accepted. They are your files on your own machine: deleting that directory discards an unflushed
+batch.
 
 Attacca stores what you send it under your own account, and the memory recalled back is yours alone.
 Privacy policy: <https://attacca.cc/privacy>.
@@ -163,12 +172,16 @@ shell-form command). The script also accepts these tuning variables:
 | `CLAUDE_PLUGIN_OPTION_ATTACCA_TOKEN` | unset | API key with `memory:read` |
 | `CLAUDE_PLUGIN_OPTION_RECALL_ON_PROMPT` | `true` | recall before each prompt |
 | `CLAUDE_PLUGIN_OPTION_PROJECT_ID` | unset | reserved; the read surface accepts and ignores it until project binding ships |
-| `CLAUDE_PLUGIN_OPTION_OBSERVE_ENABLED` | `false` | reserved for the read-write version |
+| `CLAUDE_PLUGIN_OPTION_OBSERVE_ENABLED` | `false` | send completed turns back to Attacca |
 | `ATTACCA_START_BUDGET_TOKENS` | `1200` | graph budget for the session-start recall |
 | `ATTACCA_PROMPT_BUDGET_TOKENS` | `800` | graph budget for the per-prompt recall |
 | `ATTACCA_START_DEADLINE_SECS` | `2` | session-start deadline |
 | `ATTACCA_PROMPT_DEADLINE_SECS` | `4` | per-prompt deadline |
-| `ATTACCA_CIRCUIT_BREAKER_SECS` | `60` | how long a failure silences the hooks |
+| `ATTACCA_CIRCUIT_BREAKER_SECS` | `60` | how long a failure silences the read hooks |
+| `ATTACCA_BATCH_TURNS` | `6` | turns per observe batch |
+| `ATTACCA_BATCH_MAX_AGE_SECS` | `600` | age that forces an undersized batch out |
+| `ATTACCA_QUEUE_MAX_PAIRS` | `200` | cap on queued turn pairs |
+| `ATTACCA_OBSERVE_DEADLINE_SECS` | `120` | observe request budget |
 | `ATTACCA_DEBUG` | unset | `1` writes diagnostics to stderr |
 
 The hook script is Python 3, standard library only. `hooks/hooks.json` runs it as `python3`; on a
@@ -210,7 +223,7 @@ Taken from the official reference at <https://code.claude.com/docs/en/hooks> at 
 ## Development
 
 ```
-python3 -m unittest discover -s tests -v   # 30 tests, no network
+python3 -m unittest discover -s tests -v   # 59 tests, no network
 claude plugin validate .                   # manifest, hooks, .mcp.json
 ```
 

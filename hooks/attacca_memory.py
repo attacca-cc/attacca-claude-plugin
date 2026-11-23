@@ -38,13 +38,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
-VERSION = "0.1.0"
+try:  # POSIX only; Windows has no fcntl, and a lock is an improvement, not a requirement.
+    import fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    fcntl = None
+
+VERSION = "0.2.0"
 
 # Claude Code caps additionalContext, systemMessage and plain stdout at 10,000
 # characters per string and replaces anything longer with a file path plus a
@@ -213,6 +220,16 @@ class Config:
             ),
             circuit_breaker_secs=_read_float(
                 env, "ATTACCA_CIRCUIT_BREAKER_SECS", DEFAULT_CIRCUIT_BREAKER_SECS
+            ),
+            batch_turns=_read_int(env, "ATTACCA_BATCH_TURNS", DEFAULT_BATCH_TURNS),
+            batch_max_age_secs=_read_float(
+                env, "ATTACCA_BATCH_MAX_AGE_SECS", DEFAULT_BATCH_MAX_AGE_SECS
+            ),
+            queue_max_pairs=_read_int(
+                env, "ATTACCA_QUEUE_MAX_PAIRS", DEFAULT_QUEUE_MAX_PAIRS
+            ),
+            observe_deadline_secs=_read_float(
+                env, "ATTACCA_OBSERVE_DEADLINE_SECS", DEFAULT_OBSERVE_DEADLINE_SECS
             ),
             state_dir=state_dir,
         )
@@ -532,18 +549,25 @@ def save_pending(config: Config, session_id: str, prompts: list) -> None:
     _write_json(_pending_file(config, session_id), prompts[-MAX_PENDING_PROMPTS:])
 
 
-def record_prompt(config: Config, session_id: str, prompt: str, now_ms: int) -> bool:
+def record_prompt(
+    config: Config, session_id: str, prompt: str, now_ms: int, prompt_id: str = ""
+) -> bool:
     """Remember the prompt so the next Stop can pair a reply with it.
 
     Called on the synchronous prompt path, so it writes one small file and
-    returns; nothing here talks to the network.
+    returns; nothing here talks to the network. `prompt_id` is Claude Code's own
+    id for the prompt: carrying it lets the Stop hook pair exactly rather than
+    positionally.
     """
     text = prompt if isinstance(prompt, str) else ""
     if not text.strip():
         return False
     try:
         prompts = load_pending(config, session_id)
-        prompts.append({"content": text, "ts": now_ms})
+        entry = {"content": text, "ts": now_ms}
+        if isinstance(prompt_id, str) and prompt_id:
+            entry["prompt_id"] = prompt_id
+        prompts.append(entry)
         save_pending(config, session_id, prompts)
         return True
     except OSError as exc:
@@ -690,6 +714,73 @@ class PermanentObserveError(Exception):
     """The server will refuse this batch however often it is sent."""
 
 
+class _QueueLock:
+    """An advisory exclusive lock over one session's queue.
+
+    `Stop` and `SessionEnd` are separate background processes, and a flush can
+    hold the wire for up to two minutes, so two of them can overlap. Without a
+    lock the append and the trim are read-modify-write races: the flush's stale
+    snapshot would rewrite the file without a pair a concurrent Stop had just
+    added. The lock file lives beside the queue and is emptied by nothing;
+    `flock` releases it when the process exits, however it exits.
+    """
+
+    def __init__(self, config: Config, session_id: str):
+        self.path = os.path.join(_queue_dir(config), f"{_session_slug(session_id)}.lock")
+        self.handle = None
+
+    def __enter__(self):
+        try:
+            os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
+            self.handle = open(self.path, "a+")
+            if fcntl is not None:
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+        except OSError as exc:  # a lock is best effort; a queue write still beats none
+            _debug(f"could not take the queue lock: {exc}")
+            self.handle = None
+        return self
+
+    def __exit__(self, *exc_info):
+        if self.handle is not None:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            finally:
+                self.handle.close()
+        return False
+
+
+def append_pair(config: Config, session_id: str, pair: dict) -> list:
+    """Add one pair under the lock, trimming the oldest pairs past the cap."""
+    with _QueueLock(config, session_id):
+        pairs = load_queue(config, session_id)
+        pairs.append(pair)
+        cap = max(1, config.queue_max_pairs)
+        if len(pairs) > cap:
+            _debug(f"queue over {cap} pairs; dropping the oldest")
+            pairs = pairs[-cap:]
+        save_queue(config, session_id, pairs)
+        return pairs
+
+
+def drop_pairs(config: Config, session_id: str, sent_pair_ids) -> list:
+    """Remove exactly the pairs that were sent, from a freshly read queue.
+
+    Removing by id rather than by index is what keeps a concurrent Stop's pair
+    alive: the flush loaded its snapshot before the wire call, and anything
+    appended during that call is not in the snapshot but is in the file.
+    """
+    sent = set(sent_pair_ids)
+    with _QueueLock(config, session_id):
+        remaining = [
+            pair for pair in load_queue(config, session_id) if pair.get("pair_id") not in sent
+        ]
+        save_queue(config, session_id, remaining)
+        return remaining
+
+
 def flush_queue(config: Config, session_id: str, client, now_ms=None, force=False):
     """Send the oldest batch, then forget exactly what the server took.
 
@@ -705,9 +796,10 @@ def flush_queue(config: Config, session_id: str, client, now_ms=None, force=Fals
     if not force and not queue_is_due(pairs, config, now_ms):
         return None
     batch = batch_slice(pairs, max(1, min(config.batch_turns, MAX_BATCH_TURNS)))
+    sent_ids = [pair.get("pair_id") for pair in batch]
     turns = _turns_of(batch)
     if not turns:
-        save_queue(config, session_id, pairs[len(batch):])
+        drop_pairs(config, session_id, sent_ids)
         return None
     try:
         response = client.observe(
@@ -715,9 +807,11 @@ def flush_queue(config: Config, session_id: str, client, now_ms=None, force=Fals
         )
     except urllib.error.HTTPError as exc:
         if exc.code in PERMANENT_OBSERVE_STATUSES:
-            title = "a batch the server will never take"
-            _debug(f"observe dropped {title}: HTTP {exc.code}; check the key's memory:write scope")
-            save_queue(config, session_id, pairs[len(batch):])
+            _debug(
+                f"observe dropped a batch the server will never take: HTTP {exc.code}; "
+                "check that the key has the memory:write scope and the turns are well formed"
+            )
+            drop_pairs(config, session_id, sent_ids)
             return None
         _debug(f"observe failed with HTTP {exc.code}; batch kept for the next boundary")
         return None
@@ -733,7 +827,7 @@ def flush_queue(config: Config, session_id: str, client, now_ms=None, force=Fals
         # after the cap resets is deduped by `turn_id`, so retrying is free.
         _debug(f"observe refused {refused} turn(s) at the daily cap; batch kept")
         return response
-    save_queue(config, session_id, pairs[len(batch):])
+    drop_pairs(config, session_id, sent_ids)
     _debug(
         "observe sent {len} turn(s): accepted={a} skipped={s} redacted={r} consolidated={c}".format(
             len=len(turns),
@@ -746,47 +840,80 @@ def flush_queue(config: Config, session_id: str, client, now_ms=None, force=Fals
     return response
 
 
+def _take_prompt(prompts: list, prompt_id) -> tuple:
+    """The prompt this Stop belongs to, and what is left of the pending list.
+
+    Matching on Claude Code's `prompt_id` when both sides carry one makes the
+    pairing exact; without it the oldest pending prompt is used, which is what
+    keeps working on an older Claude Code. Entries before the chosen one are
+    dropped: they are prompts whose turn never produced a Stop (an API error, an
+    interrupt), and keeping them would shift every later pair by one.
+    """
+    if not prompts:
+        return None, []
+    if isinstance(prompt_id, str) and prompt_id:
+        for index, entry in enumerate(prompts):
+            if entry.get("prompt_id") == prompt_id:
+                return entry, prompts[index + 1:]
+    return prompts[0], prompts[1:]
+
+
 def handle_stop(event, config: Config, client, now=None):
     """Stop: settle this turn pair into the queue, then maybe flush.
 
-    Stop rather than SessionEnd, for two reasons the README records: a Stop
-    fires at the end of every response, so a turn is on disk before the session
-    ends rather than only at teardown, and a plugin's SessionEnd hook cannot
-    raise the 1.5-second budget SessionEnd runs on.
+    Stop rather than SessionEnd: a Stop fires at the end of every response, so a
+    turn is on disk before the session ends rather than only at teardown, and a
+    SessionEnd hook only gets whatever is left of the session's exit.
     """
     now_ms = int(time.time() * 1000) if now is None else int(now)
     session_id = _session_id(event)
     if not session_id:
         return None
-    prompt = None
-    prompts = load_pending(config, session_id)
-    if prompts:
-        prompt = prompts.pop(0)
-        try:
-            save_pending(config, session_id, prompts)
-        except OSError as exc:
-            _debug(f"could not clear the pending prompt: {exc}")
+    prompt, remaining = _take_prompt(
+        load_pending(config, session_id),
+        event.get("prompt_id") if isinstance(event, dict) else None,
+    )
     pair = build_pair(prompt, event.get("last_assistant_message"), now_ms)
-    pairs = load_queue(config, session_id)
-    if pair:
-        pairs.append(pair)
-        cap = max(1, config.queue_max_pairs)
-        if len(pairs) > cap:
-            _debug(f"queue over {cap} pairs; dropping the oldest")
-            pairs = pairs[-cap:]
-        save_queue(config, session_id, pairs)
+    if not pair:
+        # Nothing to record. The prompt stays where it was, so a reply that never
+        # arrived does not silently consume it.
+        return None
+    pairs = append_pair(config, session_id, pair)
+    # The queue write is what makes the turn durable; only now is the prompt
+    # dropped, so a crash between the two re-pairs instead of losing the turn.
+    try:
+        save_pending(config, session_id, remaining)
+    except OSError as exc:
+        _debug(f"could not clear the pending prompt: {exc}")
     if not pairs:
         return None
     return flush_queue(config, session_id, client, now_ms)
 
 
 def handle_session_end(event, config: Config, client, now=None):
-    """SessionEnd: best-effort flush of whatever the queue still holds."""
+    """SessionEnd: drain what the queue still holds, one batch at a time.
+
+    A single flush would strand everything past the first six turns: the queue
+    file is keyed by the session id, and no later session looks at it. So the
+    loop keeps sending while the server accepts and the queue shrinks, bounded
+    so a pathological queue cannot hold the teardown forever.
+    """
     now_ms = int(time.time() * 1000) if now is None else int(now)
     session_id = _session_id(event)
     if not session_id:
         return None
-    return flush_queue(config, session_id, client, now_ms, force=True)
+    last = None
+    for _ in range(20):
+        before = len(load_queue(config, session_id))
+        if before == 0:
+            break
+        response = flush_queue(config, session_id, client, now_ms, force=True)
+        if response is None:
+            break
+        last = response
+        if len(load_queue(config, session_id)) >= before:
+            break  # nothing left the queue; sending again would repeat itself
+    return last
 
 
 class HttpObserveClient:
@@ -1025,6 +1152,12 @@ def main(argv=None, stdin=None) -> int:
     client = HttpRecallClient(config.base_url, config.token, config.project_id)
     observe_client = HttpObserveClient(config.base_url, config.token, config.project_id)
     mode = _mode(argv, event)
+    # A repository that opted out gets no outbound traffic from the prompt path
+    # at all: the per-prompt recall ships the prompt text, which is exactly what
+    # `observe = false` is about. SessionStart still asks for the account
+    # profile, which carries no session text.
+    if mode in ("prompt-submit", "UserPromptSubmit") and repo_opted_out(event):
+        return 0
     try:
         if mode in ("session-start", "SessionStart"):
             output = handle_session_start(event, config, client)
@@ -1035,8 +1168,15 @@ def main(argv=None, stdin=None) -> int:
             if observe_active(config, event):
                 session_id = _session_id(event)
                 prompt = event.get("prompt") if isinstance(event, dict) else ""
+                prompt_id = event.get("prompt_id") if isinstance(event, dict) else ""
                 if session_id and isinstance(prompt, str):
-                    record_prompt(config, session_id, prompt, int(time.time() * 1000))
+                    record_prompt(
+                        config,
+                        session_id,
+                        prompt,
+                        int(time.time() * 1000),
+                        prompt_id if isinstance(prompt_id, str) else "",
+                    )
             output = handle_prompt_submit(event, config, client)
         elif mode in ("stop", "Stop"):
             # Async: whatever comes back is not hook output and must not be

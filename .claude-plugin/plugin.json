@@ -1,8 +1,8 @@
 {
   "name": "attacca",
   "displayName": "Attacca Memory",
-  "version": "0.1.0",
-  "description": "Bring your Attacca long-term memory into Claude Code: what Attacca already knows is injected at session start and on each prompt.",
+  "version": "0.2.0",
+  "description": "Bring your Attacca long-term memory into Claude Code: what Attacca already knows is injected at session start and on each prompt, and (opt-in) your completed turns are written back in six-turn batches.",
   "author": {
     "name": "Walrus Lab",
     "email": "attacca@walruslab.org",
@@ -11,9 +11,16 @@
   "homepage": "https://attacca.cc",
   "privacyPolicyUrl": "https://attacca.cc/privacy",
   "repository": "https://github.com/attacca-cc/attacca-claude-plugin",
-  "keywords": ["memory", "attacca", "context", "recall"],
+  "keywords": [
+    "memory",
+    "attacca",
+    "context",
+    "recall"
+  ],
   "network": {
-    "hosts": ["attacca.cc"]
+    "hosts": [
+      "attacca.cc"
+    ]
   },
   "userConfig": {
     "attacca_url": {
@@ -43,7 +50,7 @@
     "observe_enabled": {
       "type": "boolean",
       "title": "Send session activity back to Attacca",
-      "description": "Off by default. When on (a later version), Claude Code session activity is written to Attacca memory.",
+      "description": "Off by default. When on, each completed turn (your prompt and Claude's reply) is queued locally and sent to Attacca in six-turn batches, so the next session and Attacca chat can recall it. Needs a key with the memory:write scope. A repository can opt out with `.claude/attacca.toml` (observe = false).",
       "default": false
     }
   }

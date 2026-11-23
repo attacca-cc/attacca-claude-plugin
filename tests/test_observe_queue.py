@@ -50,10 +50,13 @@ class StubObserveClient:
 
 
 class StubRecallClient:
+    calls = []
+
     def __init__(self, *args, **kwargs):
         pass
 
     def recall(self, *args, **kwargs):
+        StubRecallClient.calls.append(kwargs or args)
         raise urllib.error.URLError("no recall in these tests")
 
 
@@ -144,6 +147,43 @@ class BatchBoundaryTest(QueueTestBase):
         am.handle_stop(stop_event("an answer with no recorded prompt"), self.config, client, now=5)
         self.assertEqual(am.load_queue(self.config, "cc:s1")[0]["turns"][0]["role"], "assistant")
 
+    def test_prompt_id_pairs_exactly_and_drops_stale_prompts(self):
+        am.record_prompt(self.config, "cc:s1", "the prompt that failed", 1, "p-1")
+        am.record_prompt(self.config, "cc:s1", "the prompt that answered", 2, "p-2")
+        client = StubObserveClient()
+        event = stop_event("the reply")
+        event["prompt_id"] = "p-2"
+        am.handle_stop(event, self.config, client, now=3)
+        pair = am.load_queue(self.config, "cc:s1")[0]
+        self.assertEqual(pair["turns"][0]["content"], "the prompt that answered")
+        self.assertEqual(am.load_pending(self.config, "cc:s1"), [])
+
+    def test_a_pair_appended_during_a_flush_is_not_erased(self):
+        config = make_config(self.tmp.name, batch_turns=2)
+
+        class RacingClient(StubObserveClient):
+            def observe(self, session_id, turns, flush=True, timeout=20.0):
+                # Another Stop lands while this one is on the wire.
+                am.append_pair(
+                    config,
+                    "cc:s1",
+                    am.build_pair({"content": "arrived during the send", "ts": 9}, "its reply", 9),
+                )
+                return super().observe(session_id, turns, flush, timeout)
+
+        client = RacingClient(response={"accepted": 2, "skipped": 0, "refused": 0})
+        am.append_pair(
+            config,
+            "cc:s1",
+            am.build_pair({"content": "the first", "ts": 1}, "the first reply", 1),
+        )
+        am.handle_stop(stop_event("second reply"), config, client, now=2)
+        queued = am.load_queue(config, "cc:s1")
+        # The sent pair is gone; the Stop's own pair and the one that landed
+        # during the wire call are both still there.
+        contents = [pair["turns"][0]["content"] for pair in queued]
+        self.assertEqual(contents, ["second reply", "arrived during the send"])
+
     def test_an_empty_stop_records_nothing(self):
         client = StubObserveClient()
         am.handle_stop(stop_event(""), self.config, client, now=5)
@@ -230,6 +270,12 @@ class OptOutTest(QueueTestBase):
             handle.write("[attacca]\nobserve = false\n")
         self.assertFalse(am.read_repo_optout(path))
 
+    def test_an_unrelated_key_does_not_hide_the_switch(self):
+        path = os.path.join(self.tmp.name, "attacca.toml")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write('project_id = "abc"\nobserve = false\n')
+        self.assertTrue(am.read_repo_optout(path))
+
     def test_no_repo_file_means_not_opted_out(self):
         self.assertFalse(am.repo_opted_out({"cwd": self.tmp.name}))
 
@@ -274,6 +320,22 @@ class SessionEndTest(QueueTestBase):
         am.handle_session_end(session_end_event(), self.config, client, now=1_010_000)
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(len(client.calls[0]["turns"]), 4)
+        self.assertEqual(am.load_queue(self.config, "cc:s1"), [])
+
+    def test_session_end_drains_a_backlog_in_batches(self):
+        # Five pairs = ten turns queued by an outage. One flush would strand
+        # the last four turns under a session id nothing revisits.
+        client = StubObserveClient(response={"accepted": 6, "skipped": 0, "refused": 0})
+        for index in range(5):
+            am.record_prompt(self.config, "cc:s1", f"q {index}", 1_000 + index)
+            am.append_pair(
+                self.config,
+                "cc:s1",
+                am.build_pair({"content": f"q {index}", "ts": 1_000 + index}, f"a {index}", 1_000 + index),
+            )
+        self.assertEqual(len(am.load_queue(self.config, "cc:s1")), 5)
+        am.handle_session_end(session_end_event(), self.config, client, now=1_010_000)
+        self.assertEqual([len(call["turns"]) for call in client.calls], [6, 4])
         self.assertEqual(am.load_queue(self.config, "cc:s1"), [])
 
 
@@ -343,6 +405,23 @@ class MainDispatchTest(unittest.TestCase):
             self.run_main("stop", stop_event(f"answer {index}"), client, env)
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(len(client.calls[0]["turns"]), 6)
+
+    def test_a_repo_optout_stops_the_prompt_recall_too(self):
+        repo = os.path.join(self.tmp.name, "repo2")
+        os.makedirs(os.path.join(repo, ".claude"))
+        with open(os.path.join(repo, ".claude", "attacca.toml"), "w", encoding="utf-8") as handle:
+            handle.write("observe = false\n")
+        StubRecallClient.calls = []
+        client = StubObserveClient()
+        env = {"CLAUDE_PLUGIN_OPTION_OBSERVE_ENABLED": "true"}
+        self.run_main(
+            "prompt-submit",
+            {"session_id": "s1", "prompt": "a long enough question about this repo", "cwd": repo},
+            client,
+            env,
+        )
+        self.assertEqual(StubRecallClient.calls, [], "the prompt text still left the machine")
+        self.assertEqual(client.calls, [])
 
     def test_a_repo_optout_stops_every_outbound_call(self):
         repo = os.path.join(self.tmp.name, "repo")
