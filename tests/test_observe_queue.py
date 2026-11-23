@@ -288,6 +288,20 @@ class UlidTest(unittest.TestCase):
         self.assertNotEqual(am.new_ulid(5), am.new_ulid(5))
 
 
+class FilePermissionTest(QueueTestBase):
+    def test_queue_and_pending_files_are_owner_only(self):
+        am.record_prompt(self.config, "cc:s1", "a question worth keeping", 5)
+        am.handle_stop(stop_event("an answer"), self.config, StubObserveClient(), now=5)
+        for path in (
+            am._pending_file(self.config, "cc:s1"),
+            am._queue_file(self.config, "cc:s1"),
+        ):
+            self.assertTrue(os.path.exists(path), path)
+            self.assertEqual(
+                os.stat(path).st_mode & 0o077, 0, f"{path} is readable by others"
+            )
+
+
 class MainDispatchTest(unittest.TestCase):
     """`main()` end to end, with the HTTP clients patched out."""
 

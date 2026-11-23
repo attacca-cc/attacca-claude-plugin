@@ -502,11 +502,25 @@ def _load_json_list(path: str) -> list:
     return raw if isinstance(raw, list) else []
 
 
+def _private_write(path: str, text: str) -> None:
+    """Write a file only the owner can read.
+
+    The queue and the pending prompts are conversation text. A default-mode
+    file is `0644 & ~umask`, which on a shared machine would let every other
+    account read what the user said, so both are created `0600` in a `0700`
+    directory. `os.replace` keeps the permission bits of the file it moves.
+    """
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
 def _write_json(path: str, payload) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False)
+    _private_write(tmp, json.dumps(payload, ensure_ascii=False))
     os.replace(tmp, path)
 
 
@@ -566,11 +580,11 @@ def save_queue(config: Config, session_id: str, pairs: list) -> None:
             if os.path.exists(path):
                 os.remove(path)
             return
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
         tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
-            for pair in pairs:
-                handle.write(json.dumps(pair, ensure_ascii=False) + "\n")
+        _private_write(
+            tmp, "".join(json.dumps(pair, ensure_ascii=False) + "\n" for pair in pairs)
+        )
         os.replace(tmp, path)
     except OSError as exc:
         _debug(f"could not write the observe queue: {exc}")
