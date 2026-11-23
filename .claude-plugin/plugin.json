@@ -1,0 +1,50 @@
+{
+  "name": "attacca",
+  "displayName": "Attacca Memory",
+  "version": "0.1.0",
+  "description": "Bring your Attacca long-term memory into Claude Code: what Attacca already knows is injected at session start and on each prompt.",
+  "author": {
+    "name": "Walrus Lab",
+    "email": "attacca@walruslab.org",
+    "url": "https://attacca.cc"
+  },
+  "homepage": "https://attacca.cc",
+  "privacyPolicyUrl": "https://attacca.cc/privacy",
+  "repository": "https://github.com/attacca-cc/attacca-claude-plugin",
+  "keywords": ["memory", "attacca", "context", "recall"],
+  "network": {
+    "hosts": ["attacca.cc"]
+  },
+  "userConfig": {
+    "attacca_url": {
+      "type": "string",
+      "title": "Attacca URL",
+      "description": "Base URL of your Attacca instance. Leave the default unless you run a self-hosted one (no trailing slash).",
+      "default": "https://attacca.cc"
+    },
+    "attacca_token": {
+      "type": "string",
+      "title": "Attacca API key",
+      "description": "An API key with the memory:read scope. Create one in Attacca under Settings -> API keys.",
+      "sensitive": true,
+      "required": true
+    },
+    "recall_on_prompt": {
+      "type": "boolean",
+      "title": "Recall on every prompt",
+      "description": "Fetch and inject relevant memory before each prompt you send. Turn off to recall only at session start.",
+      "default": true
+    },
+    "project_id": {
+      "type": "string",
+      "title": "Project id (optional)",
+      "description": "Attacca project this session belongs to. Reserved: the read surface accepts it and ignores it until project binding ships."
+    },
+    "observe_enabled": {
+      "type": "boolean",
+      "title": "Send session activity back to Attacca",
+      "description": "Off by default. When on (a later version), Claude Code session activity is written to Attacca memory.",
+      "default": false
+    }
+  }
+}

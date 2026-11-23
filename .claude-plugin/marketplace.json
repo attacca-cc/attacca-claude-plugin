@@ -1,0 +1,17 @@
+{
+  "name": "attacca-claude-plugin",
+  "description": "The Attacca memory plugin for Claude Code, and the marketplace that serves it.",
+  "owner": {
+    "name": "Walrus Lab",
+    "email": "attacca@walruslab.org"
+  },
+  "plugins": [
+    {
+      "name": "attacca",
+      "source": "./",
+      "description": "Bring your Attacca long-term memory into Claude Code: what Attacca already knows is injected at session start and on each prompt.",
+      "homepage": "https://attacca.cc",
+      "keywords": ["memory", "attacca", "context"]
+    }
+  ]
+}

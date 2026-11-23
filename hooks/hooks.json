@@ -1,0 +1,31 @@
+{
+  "description": "Attacca memory: inject relevant memory at session start, and before each prompt you send.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/attacca_memory.py", "session-start"],
+            "timeout": 10,
+            "statusMessage": "Recalling Attacca memory"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/attacca_memory.py", "prompt-submit"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
