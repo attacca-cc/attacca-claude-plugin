@@ -428,8 +428,10 @@ class MainDispatchTest(unittest.TestCase):
         os.makedirs(os.path.join(repo, ".claude"))
         with open(os.path.join(repo, ".claude", "attacca.toml"), "w", encoding="utf-8") as handle:
             handle.write("observe = false\n")
+        StubRecallClient.calls = []
         client = StubObserveClient()
         env = {"CLAUDE_PLUGIN_OPTION_OBSERVE_ENABLED": "true"}
+        self.run_main("session-start", {"session_id": "s1", "cwd": repo}, client, env)
         for index in range(3):
             self.run_main(
                 "prompt-submit",
@@ -438,8 +440,26 @@ class MainDispatchTest(unittest.TestCase):
                 env,
             )
             self.run_main("stop", stop_event(f"answer {index}", cwd=repo), client, env)
+        self.run_main(
+            "session-end",
+            {"session_id": "s1", "hook_event_name": "SessionEnd", "cwd": repo},
+            client,
+            env,
+        )
+        self.assertEqual(
+            StubRecallClient.calls, [], "a read hook still talked to Attacca"
+        )
         self.assertEqual(client.calls, [])
         self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "queue")))
+
+    def test_session_start_still_recalls_without_an_optout(self):
+        """The gate is the opt-out file, not the event: a plain repo still recalls."""
+        repo = os.path.join(self.tmp.name, "plain")
+        os.makedirs(repo)
+        StubRecallClient.calls = []
+        client = StubObserveClient()
+        self.run_main("session-start", {"session_id": "s1", "cwd": repo}, client)
+        self.assertEqual(len(StubRecallClient.calls), 1)
 
 
 if __name__ == "__main__":

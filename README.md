@@ -60,6 +60,7 @@ lost because of this plugin.
 - every node in the answer was already injected in this session
 - a recall failed in the last 60 seconds (circuit breaker)
 - no API key is configured
+- the repository's `.claude/attacca.toml` sets `observe = false` (no outbound call at all)
 
 ## Write-back (opt-in)
 
@@ -122,9 +123,10 @@ observe = false
 
 The hook looks for that file from the session's working directory upwards (up to twelve parents), so
 a session started in a subdirectory still finds it. With it in place the plugin makes **no outbound
-call with your prompt text** and writes nothing to the queue: the per-prompt recall is skipped as
-well, because the prompt is exactly what the opt-out is about, and the turn is not recorded locally
-either. `SessionStart` still asks for the account profile, which carries no session text.
+call at all** and writes nothing to the queue: the per-prompt recall, the `SessionStart` profile
+recall and the turn recording are all skipped. The cost is deliberate: an opted-out repository gets
+no account profile injected either, because a repository that says it stays out of Attacca memory
+should not have its sessions announce themselves to Attacca at all.
 
 **Known limitation: headless sessions.** In `claude -p`, Claude Code kills an async hook still
 running at teardown. The queue write is fast and usually lands, but the flush may not, so a `-p` run
@@ -223,7 +225,7 @@ Taken from the official reference at <https://code.claude.com/docs/en/hooks> at 
 ## Development
 
 ```
-python3 -m unittest discover -s tests -v   # 59 tests, no network
+python3 -m unittest discover -s tests -v   # 60 tests, no network
 claude plugin validate .                   # manifest, hooks, .mcp.json
 ```
 

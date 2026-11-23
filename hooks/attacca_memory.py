@@ -51,7 +51,7 @@ try:  # POSIX only; Windows has no fcntl, and a lock is an improvement, not a re
 except ImportError:  # pragma: no cover - exercised on Windows
     fcntl = None
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 # Claude Code caps additionalContext, systemMessage and plain stdout at 10,000
 # characters per string and replaces anything longer with a file path plus a
@@ -1152,11 +1152,18 @@ def main(argv=None, stdin=None) -> int:
     client = HttpRecallClient(config.base_url, config.token, config.project_id)
     observe_client = HttpObserveClient(config.base_url, config.token, config.project_id)
     mode = _mode(argv, event)
-    # A repository that opted out gets no outbound traffic from the prompt path
-    # at all: the per-prompt recall ships the prompt text, which is exactly what
-    # `observe = false` is about. SessionStart still asks for the account
-    # profile, which carries no session text.
-    if mode in ("prompt-submit", "UserPromptSubmit") and repo_opted_out(event):
+    # A repository that opted out gets no outbound traffic at all: both read
+    # paths talk to Attacca (the prompt path ships the prompt text, the session
+    # start ships the session id), and "this repository stays out of Attacca
+    # memory" is a promise about the repository rather than about one payload.
+    # The write path is stopped by `observe_active`, which reads the same file.
+    if mode in (
+        "session-start",
+        "SessionStart",
+        "prompt-submit",
+        "UserPromptSubmit",
+    ) and repo_opted_out(event):
+        _debug("outbound call skipped: the repository sets observe = false")
         return 0
     try:
         if mode in ("session-start", "SessionStart"):
