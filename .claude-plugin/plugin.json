@@ -26,8 +26,8 @@
     "attacca_url": {
       "type": "string",
       "title": "Attacca URL",
-      "description": "Base URL of your Attacca instance. Leave the default unless you run a self-hosted one (no trailing slash).",
-      "default": "https://attacca.cc"
+      "description": "Base URL of your Attacca instance, including the /api prefix. Leave the default unless you run a self-hosted one (no trailing slash).",
+      "default": "https://attacca.cc/api"
     },
     "attacca_token": {
       "type": "string",

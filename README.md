@@ -20,7 +20,7 @@ Inside a Claude Code session:
 /plugin configure attacca@attacca-claude-plugin
 ```
 
-The third command is where the plugin gets your settings: leave **Attacca URL** at `https://attacca.cc`
+The third command is where the plugin gets your settings: leave **Attacca URL** at `https://attacca.cc/api`
 unless you self-host, and paste your API key into **Attacca API key** (the option is `sensitive`, so it
 is stored as a credential rather than in plain text). `claude plugin install` from a terminal instead
 of a session prints the same instruction as `5 userConfig options not yet set (1 required) — run
@@ -147,7 +147,7 @@ first. The procedure to revisit that:
 ## Privacy
 
 **Two parties see your session.** The prompt text you type goes to Anthropic (as it always does) and
-to the Attacca instance configured in `attacca_url` (by default, ours).
+to the Attacca instance configured in `attacca_url` (by default, ours at `https://attacca.cc/api`).
 
 With `observe_enabled` on, each completed turn pair also goes to Attacca, batched six turns at a
 time: your prompt and Claude's final reply for that turn. Code, file contents and terminal output are
@@ -170,7 +170,7 @@ shell-form command). The script also accepts these tuning variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CLAUDE_PLUGIN_OPTION_ATTACCA_URL` | `https://attacca.cc` | Attacca base URL, no trailing slash |
+| `CLAUDE_PLUGIN_OPTION_ATTACCA_URL` | `https://attacca.cc/api` | Attacca base URL including the `/api` prefix, no trailing slash |
 | `CLAUDE_PLUGIN_OPTION_ATTACCA_TOKEN` | unset | API key with `memory:read` |
 | `CLAUDE_PLUGIN_OPTION_RECALL_ON_PROMPT` | `true` | recall before each prompt |
 | `CLAUDE_PLUGIN_OPTION_PROJECT_ID` | unset | reserved; the read surface accepts and ignores it until project binding ships |
