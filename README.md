@@ -77,14 +77,21 @@ connection and then sleeps: `SessionStart` abandons the call at 2.0 s and `UserP
 4.0 s, both exit 0 with empty stdout (`[attacca] … DeadlineExceeded` on stderr with
 `ATTACCA_DEBUG=1`), and the circuit breaker records the failure.
 
-**Token size of the injected block.** The profile block is ~3.7-3.9k characters and the per-prompt
-block ranges 2,243-4,437 characters. There is no Anthropic tokenizer offline here, so treat those as
-characters: at the usual ~4 characters per token that is roughly 940-970 tokens at session start and
-up to ~1,100 for a prompt, i.e. **above the 800-token target** for the prompt block even though the
-request carries `budget_tokens: 800`. The engine's budget bounds which nodes are selected; the
-rendered framing lines (`- name [type]: …`, one line per relation) are not part of that accounting.
-If the 800-token target is load-bearing, the hook should measure the rendered text rather than trust
-the server budget.
+**Token size of the injected block.** Counted with `tiktoken`'s `cl100k_base` (`tiktoken 0.14.0`), which
+is a proxy for Anthropic's tokenizer rather than the same one, so read these as ±a few percent:
+
+| Block | n | p50 | p95 | max | min |
+|---|---|---|---|---|---|
+| `SessionStart` profile block (3,738 chars) | 30 | 1,247 | 1,247 | 1,247 | 1,247 |
+| per-prompt block (2,243-4,437 chars) | 25 | 977 | 1,300 | 1,442 | 161 |
+
+So **both documented targets are missed**: the profile block is 1,247 tokens against a 1,200 budget,
+and the per-prompt block is 977 at the median against 800 (p95 1,300). The request carries
+`budget_tokens: 800`/`1200` and the engine honours it when selecting nodes, but the rendered text
+adds the header plus one line per relation (`- name [type]: …`, `subject --relation--> object`),
+which the budget does not count. Lowering the graph budget (`ATTACCA_PROMPT_BUDGET_TOKENS`) is the
+lever that exists today; sizing the block from the rendered text is the fix that would make the
+number mean what it says.
 
 **Hit rate.** One session, 24 distinct prompts: 21 returned a block and 3 returned nothing, so
 `memory_recall_nonempty_ratio` = 21/24 = **0.875** for a read-only install on an account with
