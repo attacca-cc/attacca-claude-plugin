@@ -56,39 +56,43 @@ time is dominated by starting a Python process on this machine.
 |---|---|---|---|---|
 | `POST /v1/memory/recall` wall (client, `budget_tokens: 800`) | 30 | 620 ms | **799 ms** | 924 ms |
 | same request, `diagnostics.elapsed_ms` (server-side engine) | 30 | 165 ms | 204 ms | 319 ms |
-| `SessionStart` hook wall, fresh session each time | 30 | 5.1 s | 11.0 s | 11.0 s |
+| `SessionStart` hook wall, fresh session each time | 30 | 3.0 s | 7.7 s | 8.4 s |
 | `UserPromptSubmit` hook wall, 30 distinct prompts | 30 | 5.4 s | 8.4 s | 8.6 s |
 | `python3 -c pass` on the same host | 5 | 0.8 s | 2.8 s | 2.8 s |
 | `python3 -c 'import urllib.request'` on the same host | 5 | 4.0 s | 4.8 s | 4.8 s |
+
+A second, interleaved set of 10 runs per hook measured `SessionStart` p50 5.1 s and
+`UserPromptSubmit` p50 5.4 s, so read the hook rows as "several seconds, varying with host noise".
 
 So the per-prompt recall meets its p95 ≤ 800 ms target at the surface (799 ms) and by a wide
 margin inside the engine (204 ms), but the 2 s SessionStart budget is **not** met on this host:
 starting the interpreter and importing the standard library already costs ~4 s here (a virtiofs
 home volume; the same host runs a hello-world `rustc` in 8-57 s). Running the identical script from
 the container filesystem instead of the home volume did not help (p50 5.7 s), which is the evidence
-that the cost is process start, not the plugin's own I/O. On a machine with normal process startup
-the hook's own work is the bottom two rows of the table, about 0.8 s.
+that the cost is process start, not the plugin's own I/O. The hook's own contribution is the recall
+row above: about 0.6 s at the surface, 0.2 s inside the engine.
 
 The two budgets the *script* owns were verified directly against a server that accepts the
 connection and then sleeps: `SessionStart` abandons the call at 2.0 s and `UserPromptSubmit` at
 4.0 s, both exit 0 with empty stdout (`[attacca] … DeadlineExceeded` on stderr with
 `ATTACCA_DEBUG=1`), and the circuit breaker records the failure.
 
-**Token size of the injected block.** The profile block is 3,871 characters and the per-prompt block
-ranges 2,243-4,437 characters. There is no Anthropic tokenizer offline here, so treat those as
-characters: at the usual ~4 characters per token that is roughly 970 tokens at session start and up
-to ~1,100 for a prompt, i.e. **above the 800-token target** for the prompt block even though the
+**Token size of the injected block.** The profile block is ~3.7-3.9k characters and the per-prompt
+block ranges 2,243-4,437 characters. There is no Anthropic tokenizer offline here, so treat those as
+characters: at the usual ~4 characters per token that is roughly 940-970 tokens at session start and
+up to ~1,100 for a prompt, i.e. **above the 800-token target** for the prompt block even though the
 request carries `budget_tokens: 800`. The engine's budget bounds which nodes are selected; the
 rendered framing lines (`- name [type]: …`, one line per relation) are not part of that accounting.
 If the 800-token target is load-bearing, the hook should measure the rendered text rather than trust
 the server budget.
 
-**Hit rate.** One session, 24 distinct prompts: 20 returned a block and 4 returned nothing, so
-`memory_recall_nonempty_ratio` = 20/24 = **0.83** for a read-only install on an account with
-history. Six further prompts in fresh sessions were 4/6. An empty block is a normal answer (the
-recall is diff-only per session, and a prompt that shares no term with memory gets nothing), not a
-failure, so the write-back default should be judged against the 0.83 baseline rather than against
-"should always inject".
+**Hit rate.** One session, 24 distinct prompts: 21 returned a block and 3 returned nothing, so
+`memory_recall_nonempty_ratio` = 21/24 = **0.875** for a read-only install on an account with
+history (25/30 = 0.83 counting six further prompts in fresh sessions). In all of them a request that
+came back empty printed nothing and exited 0. An empty block is a normal
+answer (the recall is diff-only per session, and a prompt that shares no term with memory gets
+nothing), not a failure, so the write-back default should be judged against this baseline rather than
+against "should always inject".
 
 ## What it does
 
