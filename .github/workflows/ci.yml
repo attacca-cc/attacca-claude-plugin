@@ -2,7 +2,6 @@ name: ci
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 jobs:
@@ -38,3 +37,46 @@ jobs:
         run: |
           claude plugin validate .
           claude --version
+
+  bench:
+    name: hook wall time, n=30 (SessionStart 2 s, prompt 4 s)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The README quotes the p50/p95 of the two read hooks. They used to be
+      # measured on the Attacca Computer VM, whose virtiofs home makes process
+      # start several seconds; this job is the measurement the numbers are
+      # quoted from, on hardware a user actually has.
+      - name: Measure the two read hooks
+        run: |
+          set -o pipefail
+          python tests/bench_hooks.py --runs 30 | tee bench.txt
+
+      - name: Add the table to the job summary
+        if: always()
+        run: cat bench.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      # The numbers live in a log nobody reads. A commit status puts the p95 in
+      # the run list, where a later reader sees it without opening a job.
+      - name: Publish p50/p95 on the commit
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          summary=$(grep '^SUMMARY' bench.txt 2>/dev/null | tail -1)
+          if [ -z "$summary" ]; then summary="bench did not finish"; fi
+          if [ "${{ job.status }}" = "success" ]; then state=success; else state=failure; fi
+          gh api -X POST "repos/${{ github.repository }}/statuses/${{ github.sha }}" \
+            -f state="$state" \
+            -f context=bench/hooks \
+            -f description="$(printf '%s' "$summary" | cut -c1-140)" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            >/dev/null
