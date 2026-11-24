@@ -11,6 +11,11 @@ before each prompt, and exposes it as tools for when the automatic block is not 
 
 ## Tools
 
+Claude Code registers these as `mcp__plugin_attacca_attacca__<name>` (the plugin and the server are
+both named `attacca`) and lists them as **deferred**: their schemas are not in the prompt until
+`ToolSearch` fetches them with `query: "select:mcp__plugin_attacca_attacca__memory_recall"` (and the
+same for the other two). Do that once when a memory question actually arrives, not on every turn.
+
 - **`memory_recall`** - Recall Attacca memory for a message. Runs the same recall a turn inside
   Attacca runs and returns the block it would have injected, plus the nodes and claims it was built
   from. Use it to ask a specific question of memory: "what do we know about the staging database",
