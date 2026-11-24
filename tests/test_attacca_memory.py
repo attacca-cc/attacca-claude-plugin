@@ -157,7 +157,10 @@ class TruncationTest(unittest.TestCase):
     def test_short_text_is_untouched(self):
         self.assertEqual(am.truncate_context("short"), "short")
 
-    def test_hook_output_is_capped(self):
+    def test_hook_output_stays_under_the_ten_thousand_character_cap(self):
+        # The token budget is the tighter of the two caps now, so the assertion
+        # is one-sided: whatever the server renders, the hook output is under
+        # Claude Code's 10,000-character ceiling.
         client = StubClient(response={"rendered": "y" * 50_000, "nodes": []})
         out = am.handle_session_start(
             {"session_id": "s1", "hook_event_name": "SessionStart"},
@@ -165,8 +168,8 @@ class TruncationTest(unittest.TestCase):
             client,
         )
         context = out["hookSpecificOutput"]["additionalContext"]
-        self.assertEqual(len(context), am.MAX_CONTEXT_CHARS)
-        self.assertTrue(context.endswith(am.TRUNCATION_MARKER))
+        self.assertLessEqual(len(context), am.MAX_CONTEXT_CHARS)
+        self.assertTrue(context.endswith(am.BUDGET_TRIM_NOTE))
 
 
 class DeadlineTest(unittest.TestCase):
@@ -378,3 +381,83 @@ class DefaultBaseUrlTest(unittest.TestCase):
     def test_the_recall_url_is_the_proxied_path(self):
         client = am.HttpRecallClient("https://attacca.cc/api", "atk_test")
         self.assertEqual(client.base_url + "/v1/memory/recall", "https://attacca.cc/api/v1/memory/recall")
+
+
+class TokenBudgetTest(unittest.TestCase):
+    """The budget names a size, so the rendered block is held to it.
+
+    Staging measured `budget_tokens: 800` answers coming back as 977 tokens at
+    the median and 1,300 at p95 (2026-11-24): the server spends the budget on
+    node selection and writes the header and relation lines outside it. These
+    tests fix the hook half of the promise.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.config = make_config(self.tmp.name)
+
+    @staticmethod
+    def _block(lines: int) -> str:
+        rows = [
+            f"Background from your long-term memory (may be stale) #{i}"
+            for i in range(lines)
+        ]
+        return chr(10).join(rows)
+
+    @staticmethod
+    def _oversized():
+        names = [f"node{i}" for i in range(60)]
+        rows = [f"- {n} [entity]: x" for n in names]
+        rendered = TokenBudgetTest._block(400) + chr(10) + chr(10).join(rows)
+        return rendered, names
+
+    def test_a_short_block_is_untouched(self):
+        self.assertEqual(am.cap_to_token_budget("a memory", 800), "a memory")
+        self.assertEqual(am.cap_to_token_budget("", 800), "")
+
+    def test_a_long_block_is_cut_on_a_line_boundary(self):
+        text = self._block(400)
+        capped = am.cap_to_token_budget(text, 800)
+        self.assertLessEqual(len(capped), 800 * am.CHARS_PER_TOKEN)
+        self.assertTrue(capped.endswith(am.BUDGET_TRIM_NOTE))
+        body = capped[: -len(am.BUDGET_TRIM_NOTE)].rstrip()
+        for line in body.split(chr(10)):
+            self.assertIn(line, text)  # no half line survives
+
+    def test_the_prompt_block_never_exceeds_its_budget(self):
+        rendered, names = self._oversized()
+        response = {"rendered": rendered, "nodes": [{"name": n} for n in names]}
+        out = am.handle_prompt_submit(prompt_event(LONG_PROMPT), self.config, StubClient(response))
+        context = out["hookSpecificOutput"]["additionalContext"]
+        self.assertLessEqual(len(context), 800 * am.CHARS_PER_TOKEN)
+        self.assertTrue(context.endswith(am.BUDGET_TRIM_NOTE))
+
+    def test_the_profile_block_never_exceeds_its_budget(self):
+        rendered, names = self._oversized()
+        response = {"rendered": rendered, "nodes": [{"name": n} for n in names]}
+        out = am.handle_session_start(
+            {"session_id": "s1", "hook_event_name": "SessionStart"},
+            self.config,
+            StubClient(response),
+        )
+        context = out["hookSpecificOutput"]["additionalContext"]
+        self.assertLessEqual(len(context), 1200 * am.CHARS_PER_TOKEN)
+
+    def test_a_node_the_cut_dropped_is_offered_again(self):
+        rendered, names = self._oversized()
+        client = StubClient({"rendered": rendered, "nodes": [{"name": n} for n in names]})
+        am.handle_prompt_submit(prompt_event(LONG_PROMPT), self.config, client)
+        state = am.load_state(self.config, "cc:abc-123")
+        visible = rendered[: int(800 * am.CHARS_PER_TOKEN)]
+        shown = [n for n in names if n in visible]
+        dropped = [n for n in names if n not in shown]
+        self.assertTrue(dropped)  # the sample has to drop at least one node
+        self.assertNotIn(dropped[-1], state.injected_nodes)
+        client.response = {
+            "rendered": f"- {dropped[-1]} [entity]: x",
+            "nodes": [{"name": dropped[-1]}],
+        }
+        self.assertIsNotNone(
+            am.handle_prompt_submit(prompt_event(LONG_PROMPT), self.config, client)
+        )

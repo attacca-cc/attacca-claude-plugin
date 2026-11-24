@@ -51,7 +51,7 @@ try:  # POSIX only; Windows has no fcntl, and a lock is an improvement, not a re
 except ImportError:  # pragma: no cover - exercised on Windows
     fcntl = None
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 
 # Claude Code caps additionalContext, systemMessage and plain stdout at 10,000
 # characters per string and replaces anything longer with a file path plus a
@@ -59,6 +59,17 @@ VERSION = "0.2.1"
 # Claude instead of being moved to a file nobody reads.
 MAX_CONTEXT_CHARS = 10_000
 TRUNCATION_MARKER = "\n\n[attacca: context truncated at 10000 characters]"
+
+# The token budget a request carries bounds the nodes the server *selects*, not
+# the text it renders: the profile header and one line per relation are written
+# outside it, so a `budget_tokens: 800` answer measured 977 tokens at the median
+# and 1,300 at p95 on staging (2026-11-24). The number the budget names is the
+# promise made to the reader, so the hook holds that line on the rendered text
+# as well. The measured ratio ranged from 2.6 to 3.8 characters per token, and
+# the cap uses 2.5: erring low costs some block, erring high would make the
+# budget a decoration.
+CHARS_PER_TOKEN = 2.5
+BUDGET_TRIM_NOTE = "\n\n[attacca: trimmed to fit the token budget]"
 
 # A prompt under this many characters is a "yes", "continue", "fix it" -- too
 # small to carry a topic worth spending a recall round trip on.
@@ -956,6 +967,26 @@ def truncate_context(text: str, limit: int = MAX_CONTEXT_CHARS) -> str:
     return text[:keep] + TRUNCATION_MARKER
 
 
+def cap_to_token_budget(text: str, budget_tokens: int) -> str:
+    """Cut a rendered block down to `budget_tokens`, keeping whole lines.
+
+    A block is bullets and one line per relation, so cutting on a line boundary
+    leaves every surviving line readable. The note costs part of the budget and
+    says why the block stops where it does.
+    """
+    if not text or budget_tokens <= 0:
+        return text
+    limit = int(budget_tokens * CHARS_PER_TOKEN)
+    if len(text) <= limit:
+        return text
+    keep = max(0, limit - len(BUDGET_TRIM_NOTE))
+    cut = text[:keep]
+    newline = cut.rfind("\n")
+    if newline > 0:
+        cut = cut[:newline]
+    return cut.rstrip() + BUDGET_TRIM_NOTE
+
+
 def rendered_context(response) -> str:
     """The block the server rendered, or an empty string.
 
@@ -984,9 +1015,20 @@ def node_names(response) -> list:
     return names
 
 
-def already_injected(response, injected) -> bool:
+def visible_node_names(response, text: str) -> list:
+    """Names of the nodes whose line survived the budget cut.
+
+    The ledger records what the session was *shown*. A node the server selected
+    but the cap dropped never reached the reader, so marking it injected would
+    keep it out of every later answer -- the quietest possible way to lose a
+    memory.
+    """
+    return [name for name in node_names(response) if name in text]
+
+
+def already_injected(response, injected, names=None) -> bool:
     """True when this answer carries nothing the session has not already seen."""
-    names = node_names(response)
+    names = node_names(response) if names is None else names
     if not names:
         return False
     if isinstance(response, dict) and response.get("claims"):
@@ -1004,9 +1046,11 @@ def _session_id(event) -> str:
     return EXTERNAL_SESSION_PREFIX + raw.strip()
 
 
-def _record_success(config: Config, session_id: str, state: SessionState, response) -> None:
+def _record_success(
+    config: Config, session_id: str, state: SessionState, response, names=None
+) -> None:
     state.last_failure_at = 0.0
-    for name in node_names(response):
+    for name in (node_names(response) if names is None else names):
         if name not in state.injected_nodes:
             state.injected_nodes.append(name)
     # Keep the file from growing without bound across a long session.
@@ -1051,8 +1095,9 @@ def handle_session_start(event, config: Config, client, now=None):
         _debug(f"session-start recall failed: {type(exc).__name__}: {exc}")
         _record_failure(config, session_id, state, now)
         return None
-    text = rendered_context(response)
-    _record_success(config, session_id, state, response)
+    text = cap_to_token_budget(rendered_context(response), config.start_budget_tokens)
+    names = visible_node_names(response, text)
+    _record_success(config, session_id, state, response, names=names)
     if not text:
         _debug("session-start recall returned nothing to inject")
         return None
@@ -1108,15 +1153,16 @@ def handle_prompt_submit(event, config: Config, client, now=None):
         _debug(f"prompt-submit recall failed: {type(exc).__name__}: {exc}")
         _record_failure(config, session_id, state, now)
         return None
-    text = rendered_context(response)
+    text = cap_to_token_budget(rendered_context(response), config.prompt_budget_tokens)
+    names = visible_node_names(response, text)
     if not text:
-        _record_success(config, session_id, state, response)
+        _record_success(config, session_id, state, response, names=names)
         return None
-    if already_injected(response, state.injected_nodes):
+    if already_injected(response, state.injected_nodes, names=names):
         _debug("prompt-submit skipped: every node was already injected")
-        _record_success(config, session_id, state, response)
+        _record_success(config, session_id, state, response, names=names)
         return None
-    _record_success(config, session_id, state, response)
+    _record_success(config, session_id, state, response, names=names)
     return _output_context("UserPromptSubmit", text)
 
 
