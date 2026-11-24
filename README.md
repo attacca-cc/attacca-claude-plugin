@@ -10,6 +10,9 @@ and shows you what Attacca knows; with `observe_enabled` it also sends each comp
 Attacca in six-turn batches, so the next session (and Attacca chat) can recall what you settled here.
 Write-back ships **switched off**.
 
+The full guide, including what leaves your machine and how to switch each part off, is at
+<https://docs.attacca.cc/docs/claude-code>.
+
 ## Install (three commands)
 
 Inside a Claude Code session:
@@ -26,6 +29,14 @@ is stored as a credential rather than in plain text). `claude plugin install` fr
 of a session prints the same instruction as `5 userConfig options not yet set (1 required) — run
 /plugin configure attacca@attacca-claude-plugin`. Then start a new session (`/clear` is enough) so the
 hooks pick the key up, and run `/attacca:status` to see how many nodes Attacca holds for your account.
+
+**The hooks work wherever the key does; the two slash commands need the MCP route.** `/attacca:status`
+and `/attacca:recall` call the plugin's MCP server at `${attacca_url}/v1/mcp`, and that route is only
+mounted on an instance that sets `MEMORY_MCP_ENABLED`. `https://attacca.cc/api/v1/mcp` answers 404 as
+of 2026-11-24, so an install that leaves the default URL gets the recall hooks and a `/attacca:status`
+that reports the server as unreachable. Point **Attacca URL** at an instance with the flag on (ours:
+`https://staging.attacca.cc/api`) to use them. That is where v0.2 stands, not a misconfiguration on
+your side.
 
 ### Getting the API key
 
@@ -65,12 +76,31 @@ A second, interleaved set of 10 runs per hook measured `SessionStart` p50 5.1 s 
 `UserPromptSubmit` p50 5.4 s, so read the hook rows as "several seconds, varying with host noise".
 
 So the per-prompt recall meets its p95 ≤ 800 ms target at the surface (799 ms) and by a wide
-margin inside the engine (204 ms), but the 2 s SessionStart budget is **not** met on this host:
-starting the interpreter and importing the standard library already costs ~4 s here (a virtiofs
-home volume; the same host runs a hello-world `rustc` in 8-57 s). Running the identical script from
-the container filesystem instead of the home volume did not help (p50 5.7 s), which is the evidence
-that the cost is process start, not the plugin's own I/O. The hook's own contribution is the recall
-row above: about 0.6 s at the surface, 0.2 s inside the engine.
+margin inside the engine (204 ms). The 2 s SessionStart budget is **not** met on this host: starting
+the interpreter and importing the standard library already costs ~4 s here (a virtiofs home volume;
+the same host runs a hello-world `rustc` in 8-57 s), and running the identical script from the
+container filesystem instead of the home volume did not help (p50 5.7 s), which is the evidence that
+the cost is process start rather than the plugin's own I/O.
+
+### On ordinary hardware the 2 s budget holds
+
+`tests/bench_hooks.py` runs the hooks the way Claude Code does: one fresh interpreter per invocation,
+the event on stdin, the block on stdout, against a stub that spends 150 ms per recall (the engine's
+own p50). Thirty runs per event, on a desktop and in CI:
+
+| Measurement | Host | n | p50 | p95 | Budget |
+|---|---|---|---|---|---|
+| `SessionStart` hook wall | Windows 11, Python 3.14 | 30 | 272 ms | **294 ms** | 2 s |
+| `UserPromptSubmit` hook wall | Windows 11, Python 3.14 | 30 | 273 ms | **287 ms** | 4 s |
+| `SessionStart` hook wall | ubuntu-latest (CI) | 30 | 216 ms | **217 ms** | 2 s |
+| `UserPromptSubmit` hook wall | ubuntu-latest (CI) | 30 | 215 ms | **216 ms** | 4 s |
+| an account with no memory | both | 2 | no output, exit 0 | | |
+
+The Ubuntu rows come from the `bench` job, which runs on every push and fails the build when a p95
+crosses its budget, so the budget is enforced rather than quoted:
+[the runs](https://github.com/attacca-cc/attacca-claude-plugin/actions/workflows/ci.yml). The hook
+costs about 120 ms around the server's own latency (272 ms wall against a 150 ms stub), so the 2 s
+budget has room on hardware a user actually has, and the VM rows above are the artefact.
 
 The two budgets the *script* owns were verified directly against a server that accepts the
 connection and then sleeps: `SessionStart` abandons the call at 2.0 s and `UserPromptSubmit` at
@@ -290,7 +320,9 @@ call without that step fails with `InputValidationError`. This costs nothing in 
 tool is used, and it is why `/attacca:status` works even though no tool schema is loaded initially.
 
 The read surface is live on an Attacca instance that sets `MEMORY_MCP_ENABLED`. On an instance
-without it `/v1/mcp` is a 404 and the commands say so; the hooks above keep working either way.
+without it `/v1/mcp` is a 404 and the commands say so; the hooks above keep working either way. As of
+2026-11-24 our own production instance is one of the ones without it, so the default URL installs get
+the hooks and not the slash commands.
 
 ## Hook output schema, as implemented
 
@@ -320,7 +352,7 @@ Taken from the official reference at <https://code.claude.com/docs/en/hooks> at 
 ## Development
 
 ```
-python3 -m unittest discover -s tests -v   # 70 tests, no network
+python3 -m unittest discover -s tests -v   # 75 tests, no network
 claude plugin validate .                   # manifest, hooks, .mcp.json
 ```
 
