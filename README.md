@@ -39,10 +39,10 @@ hooks pick the key up, and run `/attacca:status` to see how many nodes Attacca h
 
 Installed from scratch into an empty `HOME` (no `~/.claude`, no Claude Code state) with the three
 commands above, against `https://staging.attacca.cc/api` with a fresh `memory:read` + `memory:write`
-key. Plugin 0.2.1, Claude Code 2.1.330.
+key. Plugin 0.2.2, Claude Code 2.1.330.
 
 - `/plugin marketplace add` took 17 s (cold clone), `install` 4 s, `configure` under 1 s.
-- `claude plugin list` reports `attacca@attacca-claude-plugin 0.2.1 — enabled`. The token is stored
+- `claude plugin list` reports `attacca@attacca-claude-plugin 0.2.2 — enabled`. The token is stored
   in `~/.claude/.credentials.json` (mode 0600) under `pluginSecrets`, not in `settings.json`.
 - `claude mcp list` reports `plugin:attacca:attacca: https://…/api/v1/mcp (HTTP) - ✔ Connected`.
 - A real session (headless `claude -p`, pointed at a stub Messages API so no model account was
@@ -82,16 +82,26 @@ is a proxy for Anthropic's tokenizer rather than the same one, so read these as 
 
 | Block | n | p50 | p95 | max | min |
 |---|---|---|---|---|---|
-| `SessionStart` profile block (3,738 chars) | 30 | 1,247 | 1,247 | 1,247 | 1,247 |
-| per-prompt block (2,243-4,437 chars) | 25 | 977 | 1,300 | 1,442 | 161 |
+| `SessionStart` profile block | 10 | **738** | 738 | 738 | 738 |
+| per-prompt block | 30 | **470** | **544** | **752** | 0 |
 
-So **both documented targets are missed**: the profile block is 1,247 tokens against a 1,200 budget,
-and the per-prompt block is 977 at the median against 800 (p95 1,300). The request carries
-`budget_tokens: 800`/`1200` and the engine honours it when selecting nodes, but the rendered text
-adds the header plus one line per relation (`- name [type]: …`, `subject --relation--> object`),
-which the budget does not count. Lowering the graph budget (`ATTACCA_PROMPT_BUDGET_TOKENS`) is the
-lever that exists today; sizing the block from the rendered text is the fix that would make the
-number mean what it says.
+Both are now under their budgets (1,200 and 800). Getting there cost something, and the history is
+worth keeping:
+
+- **The request budget did not bound the block.** It bounds the nodes the server selects; the
+  rendered text adds a header and one line per relation (`- name [type]: ...`,
+  `subject --relation--> object`) outside it. Against `budget_tokens: 800` the per-prompt block
+  measured 977 tokens at the median and 1,300 at p95, and the profile block measured 1,247 against
+  1,200.
+- **So the hook enforces the number on the text it injects.** `cap_to_token_budget` cuts a block that
+  passes `budget x 2.5` characters at the last whole line and ends it with
+  `[attacca: trimmed to fit the token budget]`.
+- **2.5 characters per token is deliberately conservative.** The measured ratio ranged from 2.6 to
+  3.8 characters per token across blocks, so the cap can stop short of the budget: the profile lands
+  at 738 of its 1,200. Sizing the render from the actual rendered text is the real fix and belongs to
+  the server; this is the hook keeping its own promise until then.
+- **A node the cut dropped is not recorded as injected**, so a later recall can still offer it. A
+  ledger that counted dropped nodes would quietly lose them for the rest of the session.
 
 **Hit rate.** One session, 24 distinct prompts: 21 returned a block and 3 returned nothing, so
 `memory_recall_nonempty_ratio` = 21/24 = **0.875** for a read-only install on an account with
