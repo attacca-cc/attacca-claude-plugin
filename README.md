@@ -173,7 +173,7 @@ shell-form command). The script also accepts these tuning variables:
 | `CLAUDE_PLUGIN_OPTION_ATTACCA_URL` | `https://attacca.cc/api` | Attacca base URL including the `/api` prefix, no trailing slash |
 | `CLAUDE_PLUGIN_OPTION_ATTACCA_TOKEN` | unset | API key with `memory:read` |
 | `CLAUDE_PLUGIN_OPTION_RECALL_ON_PROMPT` | `true` | recall before each prompt |
-| `CLAUDE_PLUGIN_OPTION_PROJECT_ID` | unset | reserved; the read surface accepts and ignores it until project binding ships |
+| `CLAUDE_PLUGIN_OPTION_PROJECT_ID` | unset | reserved; the read surface accepts and ignores it, and `/attacca:remember` does not pass it, until project binding ships |
 | `CLAUDE_PLUGIN_OPTION_OBSERVE_ENABLED` | `false` | send completed turns back to Attacca |
 | `ATTACCA_START_BUDGET_TOKENS` | `1200` | graph budget for the session-start recall |
 | `ATTACCA_PROMPT_BUDGET_TOKENS` | `800` | graph budget for the per-prompt recall |
@@ -191,11 +191,33 @@ machine where `python3` is not on `PATH` (some Windows installs) the hook cannot
 up as a hook error notice and nothing else, and will move to a Node single file if Windows turns out
 to matter.
 
-## `/attacca:recall` and `/attacca:status`
+## `/attacca:recall`, `/attacca:remember` and `/attacca:status`
 
-Both commands use the plugin's MCP server (`${attacca_url}/v1/mcp`, declared in `.mcp.json`). That
-server ships with the read tools in a later release; until then the commands explain that the MCP
-read surface is not available on your instance, and the hooks above keep working on their own.
+All three commands use the plugin's MCP server (`${attacca_url}/v1/mcp`, declared in `.mcp.json`).
+That server ships with the read tools in a later release; until then the commands explain that the
+MCP read surface is not available on your instance, and the hooks above keep working on their own.
+
+### `/attacca:remember <sentence>`
+
+Saves the sentence in Attacca memory as *your* sentence, immediately, and it is recalled in this
+session from the next prompt on and in every later session (and in an Attacca chat's recall).
+
+```
+/attacca:remember 배포는 항상 금요일 전에 끝낸다
+```
+
+- The sentence is stored as you wrote it. It is **not** run through the six-turn consolidation that
+  the Stop hook feeds; there is no model in this path, so nothing is paraphrased and nothing waits.
+- Saving the same sentence twice keeps **one** memory: the key is a hash of the sentence, so the
+  second save refreshes the row rather than adding a duplicate. The command tells you which happened
+  (`created: true` / `created: false`).
+- It needs a key with the **`memory:write`** scope. With only `memory:read`, the tool refuses and says
+  so; the read hooks keep working either way.
+- Server-side redaction applies here exactly as it does to the write path: a token pasted into the
+  sentence is masked before it is stored. A sentence that is *nothing but* a credential is refused
+  rather than stored as a mask.
+- No `project_id` means an **account** note: recalled in every session of the account. A project
+  binding arrives with the project-scope release.
 
 ## Hook output schema, as implemented
 
