@@ -35,6 +35,61 @@ hooks pick the key up, and run `/attacca:status` to see how many nodes Attacca h
    [Write-back](#write-back-opt-in)).
 3. Copy the key once (it starts with `atk_`; Attacca shows it only at creation).
 
+## Verified on a clean machine (2026-11-24)
+
+Installed from scratch into an empty `HOME` (no `~/.claude`, no Claude Code state) with the three
+commands above, against `https://staging.attacca.cc/api` with a fresh `memory:read` + `memory:write`
+key. Plugin 0.2.1, Claude Code 2.1.330.
+
+- `/plugin marketplace add` took 17 s (cold clone), `install` 4 s, `configure` under 1 s.
+- `claude plugin list` reports `attacca@attacca-claude-plugin 0.2.1 — enabled`. The token is stored
+  in `~/.claude/.credentials.json` (mode 0600) under `pluginSecrets`, not in `settings.json`.
+- `claude mcp list` reports `plugin:attacca:attacca: https://…/api/v1/mcp (HTTP) - ✔ Connected`.
+- A real session (headless `claude -p`, pointed at a stub Messages API so no model account was
+  needed) carried the recalled block into its first request, and the deferred-tool reminder listed
+  the three MCP tools by their real names.
+
+**What the numbers are, and what they are not.** The recall call itself is fast; the hook's wall
+time is dominated by starting a Python process on this machine.
+
+| Measurement | n | p50 | p95 | max |
+|---|---|---|---|---|
+| `POST /v1/memory/recall` wall (client, `budget_tokens: 800`) | 30 | 620 ms | **799 ms** | 924 ms |
+| same request, `diagnostics.elapsed_ms` (server-side engine) | 30 | 165 ms | 204 ms | 319 ms |
+| `SessionStart` hook wall, fresh session each time | 30 | 5.1 s | 11.0 s | 11.0 s |
+| `UserPromptSubmit` hook wall, 30 distinct prompts | 30 | 5.4 s | 8.4 s | 8.6 s |
+| `python3 -c pass` on the same host | 5 | 0.8 s | 2.8 s | 2.8 s |
+| `python3 -c 'import urllib.request'` on the same host | 5 | 4.0 s | 4.8 s | 4.8 s |
+
+So the per-prompt recall meets its p95 ≤ 800 ms target at the surface (799 ms) and by a wide
+margin inside the engine (204 ms), but the 2 s SessionStart budget is **not** met on this host:
+starting the interpreter and importing the standard library already costs ~4 s here (a virtiofs
+home volume; the same host runs a hello-world `rustc` in 8-57 s). Running the identical script from
+the container filesystem instead of the home volume did not help (p50 5.7 s), which is the evidence
+that the cost is process start, not the plugin's own I/O. On a machine with normal process startup
+the hook's own work is the bottom two rows of the table, about 0.8 s.
+
+The two budgets the *script* owns were verified directly against a server that accepts the
+connection and then sleeps: `SessionStart` abandons the call at 2.0 s and `UserPromptSubmit` at
+4.0 s, both exit 0 with empty stdout (`[attacca] … DeadlineExceeded` on stderr with
+`ATTACCA_DEBUG=1`), and the circuit breaker records the failure.
+
+**Token size of the injected block.** The profile block is 3,871 characters and the per-prompt block
+ranges 2,243-4,437 characters. There is no Anthropic tokenizer offline here, so treat those as
+characters: at the usual ~4 characters per token that is roughly 970 tokens at session start and up
+to ~1,100 for a prompt, i.e. **above the 800-token target** for the prompt block even though the
+request carries `budget_tokens: 800`. The engine's budget bounds which nodes are selected; the
+rendered framing lines (`- name [type]: …`, one line per relation) are not part of that accounting.
+If the 800-token target is load-bearing, the hook should measure the rendered text rather than trust
+the server budget.
+
+**Hit rate.** One session, 24 distinct prompts: 20 returned a block and 4 returned nothing, so
+`memory_recall_nonempty_ratio` = 20/24 = **0.83** for a read-only install on an account with
+history. Six further prompts in fresh sessions were 4/6. An empty block is a normal answer (the
+recall is diff-only per session, and a prompt that shares no term with memory gets nothing), not a
+failure, so the write-back default should be judged against the 0.83 baseline rather than against
+"should always inject".
+
 ## What it does
 
 | Hook | When | What it sends | Budget |
@@ -193,9 +248,28 @@ to matter.
 
 ## `/attacca:recall` and `/attacca:status`
 
-Both commands use the plugin's MCP server (`${attacca_url}/v1/mcp`, declared in `.mcp.json`). That
-server ships with the read tools in a later release; until then the commands explain that the MCP
-read surface is not available on your instance, and the hooks above keep working on their own.
+Both commands use the plugin's MCP server (`${attacca_url}/v1/mcp`, declared in `.mcp.json`). The
+server name inside Claude Code is namespaced by the plugin, so the tools are really called:
+
+| Tool | Real name |
+|---|---|
+| recall | `mcp__plugin_attacca_attacca__memory_recall` |
+| search | `mcp__plugin_attacca_attacca__memory_search` |
+| status | `mcp__plugin_attacca_attacca__memory_status` |
+
+Note it is `mcp__plugin_attacca_attacca__…`, not `mcp__attacca__…`: the middle segment is the
+plugin and the last is the server. Both `commands/*.md` files already use the fully qualified names
+in their `allowed-tools`, and the skill refers to them by the bare tool name because that is how a
+model reads them.
+
+Claude Code 2.1.330 lists these three as **deferred tools**: their names arrive in a
+`<system-reminder>` at session start, and their schemas have to be fetched with `ToolSearch`
+(`query: "select:mcp__plugin_attacca_attacca__memory_status"`) before a call is possible. A direct
+call without that step fails with `InputValidationError`. This costs nothing in the prompt until a
+tool is used, and it is why `/attacca:status` works even though no tool schema is loaded initially.
+
+The read surface is live on an Attacca instance that sets `MEMORY_MCP_ENABLED`. On an instance
+without it `/v1/mcp` is a 404 and the commands say so; the hooks above keep working either way.
 
 ## Hook output schema, as implemented
 
@@ -225,20 +299,27 @@ Taken from the official reference at <https://code.claude.com/docs/en/hooks> at 
 ## Development
 
 ```
-python3 -m unittest discover -s tests -v   # 60 tests, no network
+python3 -m unittest discover -s tests -v   # 70 tests, no network
 claude plugin validate .                   # manifest, hooks, .mcp.json
 ```
 
 The tests cover the skip rules, truncation at the 10,000-character cap, the hard deadline, the
 fail-open paths and the circuit breaker. The last fail-open test runs the script as a subprocess
-against a closed port and asserts exit 0 with empty stdout.
+against a closed port and asserts exit 0 with empty stdout. `tests/test_manifests.py` is the
+cross-check CI runs on its own: every `${user_config.x}` reference in `.mcp.json`/`hooks.json` is
+declared in `plugin.json`, every `CLAUDE_PLUGIN_OPTION_*` the script reads is a declared option,
+`hooks.json` points at files that exist, and the marketplace serves the plugin from its root.
+`claude plugin validate` does not check any of that — it validates each manifest against its own
+schema.
 
 ## Status
 
-- Read-only recall: working.
+- Read-only recall: working, measured on a clean install (see above).
 - Write-back (`observe`, six-turn batches, repository opt-out): working, opt-in (`observe_enabled`,
   default `false`).
-- MCP read tools (`memory_recall`, `memory_search`, `memory_status`): declared, landing with
-  `/v1/mcp`.
+- MCP read tools (`memory_recall`, `memory_search`, `memory_status`): live against an instance with
+  `MEMORY_MCP_ENABLED`; exposed as `mcp__plugin_attacca_attacca__*` and loaded through `ToolSearch`.
 - `notes` / `/attacca:remember`: not in this version.
-- License: not chosen yet; the repository is public without one until the owner sets it.
+- License: not chosen yet; the repository is public without one until the owner sets it. Note that
+  `claude plugin validate . --profile directory` (the stricter profile used for a marketplace
+  submission) fails on `LICENSE_MISSING` until this is settled, and warns about a missing icon.
