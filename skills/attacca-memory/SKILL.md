@@ -21,6 +21,12 @@ before each prompt, and exposes it as tools for when the automatic block is not 
   consolidation ran, and how many external sessions the serving process holds. Use it before
   telling the user memory is empty - it distinguishes "no memory" from "recall found nothing for
   this message".
+- **`memory_remember`** - Save a sentence the user asked you to keep. Call it whenever they say
+  "remember this", "기억해", "잊지 마", or tell you a preference they clearly expect to hold in
+  later sessions; `/attacca:remember <sentence>` is the same call as a slash command. Pass the
+  sentence **as they said it** - do not paraphrase, translate or summarise it, because the sentence
+  itself is what gets stored. An account note (no `project_id`) is recalled in every session of
+  this account, including this one; `created: false` means it was already remembered.
 
 ## How to use what comes back
 
@@ -33,10 +39,18 @@ before each prompt, and exposes it as tools for when the automatic block is not 
 - `rendered` empty is a normal answer, not a failure: recall is diff-only per session, so a second
   call for the same session returns nothing new. `diagnostics.why` says which case it is
   (`no_delta`, `no_anchor`, `budget`, `no_project`).
-- Claims are scoped by project, and an external `cc:` session has no project binding yet, so
-  `claims` can be empty while the graph nodes are not.
+- Project claims are scoped by project, and an external `cc:` session has no project binding yet, so
+  the compiled part of `claims` is empty for most Claude Code sessions. What *is* carried is the
+  user's own notes (`source_kind: authored`), which belong to the account rather than a project -
+  those render first, under their own heading.
+- A note is the user's own sentence; a compiled claim is something a machine read out of their
+  project's documents. When the two disagree, the note wins, and a note that looks stale is worth
+  confirming with the user rather than silently following.
 
-## What this plugin does not do (yet)
+## What this plugin writes
 
-It does not write to Attacca. Nothing this session decides reaches Attacca memory on its own; if the
-user expects that, say it plainly instead of implying the memory updated itself.
+- **`memory_remember`** (and `/attacca:remember`) writes on purpose: the user asked for it, and the
+  sentence lands immediately as an `authored` claim.
+- **The Stop hook**, only when `observe_enabled` is on, batches completed turns back to Attacca; see
+  the README's "Write-back" section. With it off, nothing this session decides reaches Attacca on its
+  own - say that plainly rather than implying the memory updated itself.
